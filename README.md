@@ -1,3 +1,5 @@
+> ⚠️ **Mirror** — This repository is mirrored from [GitLab](https://gitlab.com/opensecdevops/osdo-scanner). Please submit issues and merge requests there.
+
 # OSDO Scanner
 
 Imagen Docker oficial de OSDO con todas las herramientas DevSecOps pre-instaladas.
