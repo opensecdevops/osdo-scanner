@@ -1,0 +1,131 @@
+name: Build y Publicar imagen osdo-scanner
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - Dockerfile
+      - tools.json
+      - entrypoint.sh
+  pull_request:
+    branches: [main]
+    paths:
+      - Dockerfile
+      - tools.json
+      - entrypoint.sh
+  schedule:
+    - cron: '0 3 * * 0'    # Rebuild semanal los domingos para capturar updates de la imagen base
+  workflow_dispatch:
+    inputs:
+      push:
+        description: 'Publicar imagen (ignorado en PRs)'
+        type: boolean
+        default: true
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: opensecdevops/osdo-scanner
+
+jobs:
+  build:
+    name: Build y Push
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+      security-events: write    # Para subir resultado SARIF de Trivy
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Leer versiones de herramientas desde tools.json
+        id: tools
+        run: |
+          echo "GITLEAKS_VERSION=$(jq -r '.gitleaks.version' tools.json)" >> "$GITHUB_ENV"
+          echo "TRIVY_VERSION=$(jq -r '.trivy.version' tools.json)" >> "$GITHUB_ENV"
+          echo "GRYPE_VERSION=$(jq -r '.grype.version' tools.json)" >> "$GITHUB_ENV"
+          echo "OSV_VERSION=$(jq -r '."osv-scanner".version' tools.json)" >> "$GITHUB_ENV"
+          echo "HADOLINT_VERSION=$(jq -r '.hadolint.version' tools.json)" >> "$GITHUB_ENV"
+          echo "SYFT_VERSION=$(jq -r '.syft.version' tools.json)" >> "$GITHUB_ENV"
+          echo "COSIGN_VERSION=$(jq -r '.cosign.version' tools.json)" >> "$GITHUB_ENV"
+          echo "TRUFFLEHOG_VERSION=$(jq -r '.trufflehog.version' tools.json)" >> "$GITHUB_ENV"
+          echo "SEMGREP_VERSION=$(jq -r '.semgrep.version' tools.json)" >> "$GITHUB_ENV"
+          echo "CHECKOV_VERSION=$(jq -r '.checkov.version' tools.json)" >> "$GITHUB_ENV"
+          echo "BANDIT_VERSION=$(jq -r '.bandit.version' tools.json)" >> "$GITHUB_ENV"
+          echo "SAFETY_VERSION=$(jq -r '.safety.version' tools.json)" >> "$GITHUB_ENV"
+
+      - name: Configurar QEMU (multi-arch)
+        uses: docker/setup-qemu-action@v3
+
+      - name: Configurar Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login a GitHub Container Registry
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Generar tags y labels de la imagen
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=sha,prefix=sha-,format=short
+            type=schedule,pattern={{date 'YYYYMMDD'}}
+            type=semver,pattern={{version}}
+
+      - name: Build y Push imagen
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            GITLEAKS_VERSION=${{ env.GITLEAKS_VERSION }}
+            TRIVY_VERSION=${{ env.TRIVY_VERSION }}
+            GRYPE_VERSION=${{ env.GRYPE_VERSION }}
+            OSV_VERSION=${{ env.OSV_VERSION }}
+            HADOLINT_VERSION=${{ env.HADOLINT_VERSION }}
+            SYFT_VERSION=${{ env.SYFT_VERSION }}
+            COSIGN_VERSION=${{ env.COSIGN_VERSION }}
+            TRUFFLEHOG_VERSION=${{ env.TRUFFLEHOG_VERSION }}
+            SEMGREP_VERSION=${{ env.SEMGREP_VERSION }}
+            CHECKOV_VERSION=${{ env.CHECKOV_VERSION }}
+            BANDIT_VERSION=${{ env.BANDIT_VERSION }}
+            SAFETY_VERSION=${{ env.SAFETY_VERSION }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # Dogfooding: escanear la propia imagen que acabamos de construir
+      - name: Escanear imagen con Trivy (dogfooding)
+        if: github.event_name != 'pull_request'
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
+          format: sarif
+          output: trivy-results.sarif
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
+
+      - name: Subir resultados SARIF a GitHub Security
+        if: github.event_name != 'pull_request'
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: trivy-results.sarif
+          category: osdo-scanner-image
+
+      - name: Resumen del build
+        run: |
+          echo "## OSDO Scanner Build Completado" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Herramienta | Versión |" >> "$GITHUB_STEP_SUMMARY"
+          echo "|-------------|---------|" >> "$GITHUB_STEP_SUMMARY"
+          jq -r 'to_entries[] | "| \(.key) | \(.value.version) |"' tools.json >> "$GITHUB_STEP_SUMMARY"

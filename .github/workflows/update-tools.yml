@@ -1,0 +1,98 @@
+name: Actualizar versiones de herramientas
+
+on:
+  schedule:
+    - cron: '0 9 * * 1'    # Cada lunes a las 9am
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  check-and-update:
+    name: Verificar y actualizar versiones
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Instalar jq
+        run: sudo apt-get install -y jq
+
+      - name: Verificar últimas versiones en GitHub
+        id: check
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          UPDATED=false
+          CHANGES=""
+          TOOLS_JSON=$(cat tools.json)
+
+          check_github_release() {
+            local TOOL="$1"
+            local REPO="$2"
+            local CURRENT="$3"
+
+            LATEST=$(gh api "repos/${REPO}/releases/latest" --jq '.tag_name' 2>/dev/null | sed 's/^v//' || echo "")
+            if [ -z "$LATEST" ]; then
+              echo "⚠️  No se pudo obtener la versión de ${TOOL}"
+              return
+            fi
+
+            if [ "$LATEST" != "$CURRENT" ]; then
+              echo "📦 ${TOOL}: ${CURRENT} → ${LATEST}"
+              # Actualizar en tools.json usando jq
+              TOOLS_JSON=$(echo "$TOOLS_JSON" | jq --arg t "$TOOL" --arg v "$LATEST" '.[$t].version = $v')
+              UPDATED=true
+              CHANGES="${CHANGES}- **${TOOL}**: \`${CURRENT}\` → \`${LATEST}\`\n"
+            else
+              echo "✅ ${TOOL}: ${CURRENT} (actualizado)"
+            fi
+          }
+
+          check_github_release "gitleaks"    "zricethezav/gitleaks"         "$(jq -r '.gitleaks.version' tools.json)"
+          check_github_release "trivy"       "aquasecurity/trivy"           "$(jq -r '.trivy.version' tools.json)"
+          check_github_release "grype"       "anchore/grype"                "$(jq -r '.grype.version' tools.json)"
+          check_github_release "osv-scanner" "google/osv-scanner"           "$(jq -r '."osv-scanner".version' tools.json)"
+          check_github_release "hadolint"    "hadolint/hadolint"            "$(jq -r '.hadolint.version' tools.json)"
+          check_github_release "syft"        "anchore/syft"                 "$(jq -r '.syft.version' tools.json)"
+          check_github_release "cosign"      "sigstore/cosign"              "$(jq -r '.cosign.version' tools.json)"
+          check_github_release "trufflehog"  "trufflesecurity/trufflehog"   "$(jq -r '.trufflehog.version' tools.json)"
+
+          # Si hay actualizaciones, guardar el JSON modificado
+          if [ "$UPDATED" = "true" ]; then
+            echo "$TOOLS_JSON" | jq '.' > tools.json
+            echo "updated=true" >> "$GITHUB_OUTPUT"
+            echo "changes<<EOF" >> "$GITHUB_OUTPUT"
+            echo -e "$CHANGES" >> "$GITHUB_OUTPUT"
+            echo "EOF" >> "$GITHUB_OUTPUT"
+          else
+            echo "updated=false" >> "$GITHUB_OUTPUT"
+            echo "Sin actualizaciones disponibles esta semana."
+          fi
+
+      - name: Crear Pull Request con actualizaciones
+        if: steps.check.outputs.updated == 'true'
+        uses: peter-evans/create-pull-request@v7
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          commit-message: "chore: actualizar versiones de herramientas de seguridad"
+          title: "chore: actualizar herramientas DevSecOps — ${{ github.run_id }}"
+          body: |
+            ## Actualizaciones automáticas de herramientas
+
+            Las siguientes herramientas tienen nuevas versiones disponibles:
+
+            ${{ steps.check.outputs.changes }}
+
+            Este PR fue generado automáticamente por el workflow `update-tools.yml`.
+
+            ### ¿Qué hacer?
+            1. Revisar las notas de release de cada herramienta actualizada
+            2. Verificar que no hay breaking changes que afecten los scans de OSDO
+            3. Aprobar y mergear — el workflow `build.yml` construirá y publicará la nueva imagen automáticamente
+          branch: "chore/update-tools-${{ github.run_number }}"
+          labels: "dependencies,automated"
+          delete-branch: true
